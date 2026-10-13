@@ -49,7 +49,7 @@ public class LegalTextEditorBasic extends JFrame {
         formatMenu.add(menuItem("Italic", e -> toggleStyle(ITALIC_STYLE)));
         formatMenu.add(menuItem("Underline", e -> toggleStyle(UNDERLINE_STYLE)));
 
-        // Kept as UI placeholders. AI behavior is intentionally not implemented.
+       
         caseMenu.add(new JMenuItem("Case Information"));
         caseMenu.add(new JMenuItem("Import Case Material"));
         aiMenu.add(new JMenuItem("AI Analyze"));
@@ -96,7 +96,8 @@ public class LegalTextEditorBasic extends JFrame {
         center.addActionListener(e -> alignText(StyleConstants.ALIGN_CENTER));
         right.addActionListener(e -> alignText(StyleConstants.ALIGN_RIGHT));
 
-        // AI/case controls remain visible and deliberately do nothing.
+      
+        
         upload.setFocusable(false);
         analyze.setFocusable(false);
 
