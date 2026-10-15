@@ -74,6 +74,9 @@ public class LegalTextEditorBasic extends JFrame {
         caseMenu.add(menuItem("Import Case Material...", e -> addContextDocuments()));
         aiMenu.add(menuItem("AI Analyze", e -> analyzeDocument()));
         aiMenu.add(menuItem("AI Suggestions", e -> analyzeDocument()));
+        aiMenu.addSeparator();
+        aiMenu.add(menuItem("Login to ChatGPT...", e -> loginToChatGPT()));
+        aiMenu.add(menuItem("Sign out of ChatGPT", e -> signOutOfChatGPT()));
         helpMenu.add(new JMenuItem("About"));
 
         menuBar.add(fileMenu);
@@ -308,6 +311,25 @@ public class LegalTextEditorBasic extends JFrame {
 
     private void analyzeDocument() {
         sendMessage("Analyze the current draft. Identify issues and ambiguities, and support factual or legal claims with explicit references.");
+    }
+
+    private void loginToChatGPT() {
+        statusLabel.setText("Waiting for ChatGPT sign-in");
+        new SwingWorker<Void, Void>() {
+            protected Void doInBackground() throws Exception { aiClient.signIn(); return null; }
+            protected void done() {
+                try { get(); statusLabel.setText("Signed in to ChatGPT");
+                    JOptionPane.showMessageDialog(LegalTextEditorBasic.this,
+                            "ChatGPT is connected. The document assistant can now use this account's eligible plan access.",
+                            "ChatGPT connected", JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception ex) { statusLabel.setText("ChatGPT sign-in failed"); showError("Could not sign in to ChatGPT", ex); }
+            }
+        }.execute();
+    }
+
+    private void signOutOfChatGPT() {
+        try { aiClient.signOut(); statusLabel.setText("Signed out of ChatGPT"); }
+        catch (IOException ex) { showError("Could not sign out", ex); }
     }
 
     private void sendChatMessage() {

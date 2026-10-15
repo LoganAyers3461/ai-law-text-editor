@@ -23,23 +23,23 @@ size, bold, italic, underline, and paragraph alignment. Save as `.rtf` to
 preserve that formatting when reopening the document; `.txt` and `.md` remain
 available for plain text, which does not retain formatting.
 
-The application requires Java 11 or newer. Copy `.env.example` to `.env` in
-the project directory and add your key to `OPENAI_API_KEY`. The app loads this
-file at startup; process environment variables override values from `.env`.
-Optionally set `OPENAI_MODEL` to choose a model; the default is
-`gpt-4.1-mini`. Launch the app with the project directory as the working
-directory so it can find `.env`:
+The application requires Java 11 or newer. Use **AI > Login to ChatGPT...**
+to authorize in your browser. The desktop app receives an authorization code
+through a temporary loopback listener, then stores refresh credentials in
+`~/.config/ai-law-text-editor/credentials.properties` with owner-only
+permissions on POSIX systems. Use **AI > Sign out of ChatGPT** to remove the
+saved tokens. The app sends document requests to the Responses API with
+`store:false`, streaming enabled, and web search. The user's plan and account
+must permit this integration; ChatGPT sign-in does not expose ChatGPT
+conversations or memory to the app. The open-source token-sharing flow also
+requires the app to be eligible/registered with OpenAI.
+
+Optionally set `OPENAI_MODEL` in `.env` or the process environment to select
+the Responses model (default `gpt-4.1-mini`). No API key is required. Launch:
 
 ```sh
 cp .env.example .env
-# Edit .env and set OPENAI_API_KEY
 java LegalTextEditorBasic
 ```
 
-The local `.env` file is excluded from Git. The key is read at startup and is
-not written by the application. A desktop application making direct API
-requests cannot hide a shared API key from its user or from inspection of the
-running process. A deployed multi-user version should send requests through a
-trusted backend that stores the key. Document and context contents are sent to
-the configured OpenAI API when analysis is requested; do not submit material
-unless permitted for that use.
+Document and context contents are sent to OpenAI when analysis is requested.

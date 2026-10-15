@@ -16,12 +16,14 @@ public final class OpenAIClient {
     private static final String ENDPOINT = "https://api.openai.com/v1/responses";
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(20)).build();
-    private final String apiKey;
+    private final ChatGPTPlanAuth auth = new ChatGPTPlanAuth();
     private final String model;
+    public boolean isSignedIn() { return auth.isSignedIn(); }
+    public void signIn() throws Exception { auth.signIn(); }
+    public void signOut() throws IOException { auth.signOut(); }
 
     public OpenAIClient() {
-        this(configValue("OPENAI_API_KEY"),
-                configuredModel());
+        this.model = configuredModel();
     }
 
     private static String configuredModel() {
@@ -55,11 +57,6 @@ public final class OpenAIClient {
         return null;
     }
 
-    OpenAIClient(String apiKey, String model) {
-        this.apiKey = apiKey;
-        this.model = model;
-    }
-
     public String analyze(String document, List<String> contextDocuments)
             throws IOException, InterruptedException {
         return chat(document, contextDocuments, "", "", "", "Analyze the current draft. Identify issues and ambiguities.");
@@ -68,9 +65,7 @@ public final class OpenAIClient {
     public String chat(String document, List<String> contextDocuments, String jurisdiction,
                        String situationNotes, String conversationHistory, String message)
             throws IOException, InterruptedException {
-        if (apiKey == null || apiKey.isBlank()) {
-            throw new IllegalStateException("Set OPENAI_API_KEY in .env before using document chat.");
-        }
+        String accessToken = auth.accessToken();
         StringBuilder prompt = new StringBuilder();
         prompt.append("You are assisting with one legal document in a self-contained workspace. Use only the "
                 + "current document, its attached context documents, its case metadata, this conversation, "
@@ -93,22 +88,45 @@ public final class OpenAIClient {
             prompt.append("\n\nTHIS DOCUMENT'S CHAT HISTORY:\n").append(conversationHistory);
         }
         prompt.append("\n\nUSER MESSAGE:\n").append(message);
-        String body = "{\"model\":" + json(model) + ",\"store\":false,\"input\":"
-                + json(prompt.toString()) + ",\"tools\":[{\"type\":\"web_search\"}]}";
+        String instructions = "Keep this work scoped to the supplied document, its attached context and metadata, this document's chat, and sources retrieved with web search. Give explicit source title and URL for external claims; prefer official legal sources, and do not invent authorities.";
+        String body = "{\"model\":" + json(model) + ",\"instructions\":" + json(instructions)
+                + ",\"store\":false,\"stream\":true,\"input\":[{\"role\":\"user\",\"content\":"
+                + json(prompt.toString()) + "}],\"tools\":[{\"type\":\"web_search\"}]}";
         HttpRequest request = HttpRequest.newBuilder(URI.create(ENDPOINT))
                 .timeout(Duration.ofSeconds(120))
-                .header("Authorization", "Bearer " + apiKey)
+                .header("Authorization", "Bearer " + accessToken)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build();
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<java.util.stream.Stream<String>> response = http.send(request, HttpResponse.BodyHandlers.ofLines());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IOException("OpenAI API returned HTTP " + response.statusCode() + ": "
-                    + response.body().substring(0, Math.min(1000, response.body().length())));
+            try (java.util.stream.Stream<String> lines = response.body()) {
+                String error = lines.limit(20).reduce("", (a, b) -> a + b).replaceAll("\\s+", " ");
+                throw new IOException("ChatGPT Responses API returned HTTP " + response.statusCode() + ": " + error);
+            }
         }
-        String output = extractText(response.body());
-        output = appendCitations(output, response.body());
-        if (output.isBlank()) throw new IOException("The API returned no analysis text.");
-        return output;
+        StringBuilder output = new StringBuilder();
+        String completedEvent = "";
+        boolean completed = false;
+        try (java.util.stream.Stream<String> lines = response.body()) {
+            java.util.Iterator<String> iterator = lines.iterator();
+            while (iterator.hasNext()) {
+                String line = iterator.next();
+                if (!line.startsWith("data:")) continue;
+                String data = line.substring(5).trim();
+                if ("[DONE]".equals(data)) break;
+                String type = ChatGPTPlanAuth.jsonValue(data, "type");
+                if ("response.output_text.delta".equals(type)) {
+                    String delta = ChatGPTPlanAuth.jsonValue(data, "delta");
+                    if (delta != null) output.append(delta);
+                } else if ("response.completed".equals(type)) { completed = true; completedEvent = data; }
+                else if ("response.failed".equals(type) || "error".equals(type))
+                    throw new IOException("ChatGPT could not complete the request: " + data.substring(0, Math.min(800, data.length())));
+            }
+        }
+        if (!completed) throw new IOException("ChatGPT response stream ended before completion.");
+        String result = appendCitations(output.toString(), completedEvent);
+        if (result.isBlank()) throw new IOException("ChatGPT returned no analysis text.");
+        return result;
     }
 
     private static String emptyAsUnspecified(String value) {
