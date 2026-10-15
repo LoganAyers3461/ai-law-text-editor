@@ -17,18 +17,19 @@ public final class OpenAIClient {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(20)).build();
     private final ChatGPTPlanAuth auth = new ChatGPTPlanAuth();
-    private final String model;
+    private final String configuredModel;
+    private volatile List<ChatGPTModelCatalog.Model> modelCatalog;
     public boolean isSignedIn() { return auth.isSignedIn(); }
-    public void signIn() throws Exception { auth.signIn(); }
-    public void signOut() throws IOException { auth.signOut(); }
+    public void signIn() throws Exception { auth.signIn(); modelCatalog = null; }
+    public void signOut() throws IOException { auth.signOut(); modelCatalog = null; }
 
     public OpenAIClient() {
-        this.model = configuredModel();
+        this.configuredModel = configuredModel();
     }
 
     private static String configuredModel() {
         String value = configValue("OPENAI_MODEL");
-        return value == null || value.isBlank() ? "gpt-4.1-mini" : value;
+        return value == null || value.isBlank() ? null : value;
     }
 
     // Process environment takes precedence; .env is a local fallback and is never written by the app.
@@ -66,6 +67,7 @@ public final class OpenAIClient {
                        String situationNotes, String conversationHistory, String message)
             throws IOException, InterruptedException {
         String accessToken = auth.accessToken();
+        String model = selectModel(accessToken).slug;
         StringBuilder prompt = new StringBuilder();
         prompt.append("You are assisting with one legal document in a self-contained workspace. Use only the "
                 + "current document, its attached context documents, its case metadata, this conversation, "
@@ -100,8 +102,10 @@ public final class OpenAIClient {
         HttpResponse<java.util.stream.Stream<String>> response = http.send(request, HttpResponse.BodyHandlers.ofLines());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             try (java.util.stream.Stream<String> lines = response.body()) {
-                String error = lines.limit(20).reduce("", (a, b) -> a + b).replaceAll("\\s+", " ");
-                throw new IOException("ChatGPT Responses API returned HTTP " + response.statusCode() + ": " + error);
+                String error = lines.limit(20).reduce("", (a, b) -> a + b);
+                String requestId = response.headers().firstValue("x-request-id")
+                        .orElse(response.headers().firstValue("openai-request-id").orElse(null));
+                throw ChatGPTApiErrors.httpFailure(response.statusCode(), error, requestId);
             }
         }
         StringBuilder output = new StringBuilder();
@@ -120,13 +124,33 @@ public final class OpenAIClient {
                     if (delta != null) output.append(delta);
                 } else if ("response.completed".equals(type)) { completed = true; completedEvent = data; }
                 else if ("response.failed".equals(type) || "error".equals(type))
-                    throw new IOException("ChatGPT could not complete the request: " + data.substring(0, Math.min(800, data.length())));
+                    throw ChatGPTApiErrors.streamFailure(data);
+                else if ("response.incomplete".equals(type))
+                    throw new IOException("ChatGPT stopped before completing the response. Try a shorter document or request.");
             }
         }
         if (!completed) throw new IOException("ChatGPT response stream ended before completion.");
         String result = appendCitations(output.toString(), completedEvent);
         if (result.isBlank()) throw new IOException("ChatGPT returned no analysis text.");
         return result;
+    }
+
+    private ChatGPTModelCatalog.Model selectModel(String accessToken) throws IOException, InterruptedException {
+        List<ChatGPTModelCatalog.Model> models = modelCatalog;
+        if (models == null) {
+            HttpRequest request = HttpRequest.newBuilder(URI.create("https://api.openai.com/v1/models"))
+                    .timeout(Duration.ofSeconds(30)).header("Authorization", "Bearer " + accessToken)
+                    .header("Accept", "application/json").GET().build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                String requestId = response.headers().firstValue("x-request-id")
+                        .orElse(response.headers().firstValue("openai-request-id").orElse(null));
+                throw ChatGPTApiErrors.httpFailure(response.statusCode(), response.body(), requestId);
+            }
+            models = ChatGPTModelCatalog.parse(response.body());
+            modelCatalog = models;
+        }
+        return ChatGPTModelCatalog.select(models, configuredModel);
     }
 
     private static String emptyAsUnspecified(String value) {

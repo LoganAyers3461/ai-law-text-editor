@@ -1,6 +1,7 @@
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.print.PrinterException;
+import java.awt.print.PrinterJob;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -16,10 +17,23 @@ import javax.swing.event.DocumentListener;
 import javax.swing.event.HyperlinkEvent;
 import javax.swing.text.*;
 import javax.swing.text.rtf.RTFEditorKit;
+import javax.swing.undo.CannotRedoException;
+import javax.swing.undo.CannotUndoException;
+import javax.swing.undo.UndoManager;
+import javax.swing.event.UndoableEditEvent;
+import javax.swing.event.UndoableEditListener;
+import javax.print.attribute.HashPrintRequestAttributeSet;
+import javax.print.attribute.PrintRequestAttributeSet;
+import javax.print.attribute.standard.Destination;
 
 public class LegalTextEditorBasic extends JFrame {
     private static final int BOLD_STYLE = 1, ITALIC_STYLE = 2, UNDERLINE_STYLE = 3;
     private final JTextPane documentEditor = new JTextPane();
+    private boolean loadingDocument;
+    private final UndoManager undoManager = new UndoManager();
+    private final UndoableEditListener undoListener = (UndoableEditEvent event) -> {
+        if (!loadingDocument) undoManager.addEdit(event.getEdit());
+    };
     private final JLabel statusLabel = new JLabel("Ready");
     private final JLabel caseLabel = new JLabel("Case: No case selected");
     private final JEditorPane aiPanel = new JEditorPane();
@@ -33,11 +47,13 @@ public class LegalTextEditorBasic extends JFrame {
     private String jurisdiction = "";
     private String situationNotes = "";
     private boolean chatRequestInProgress;
+    private boolean documentDirty;
+    private String lastSearch = "";
     private File currentFile;
 
     public LegalTextEditorBasic() {
         setTitle("Legal Text Editor");
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
         setSize(1200, 750);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
@@ -54,16 +70,23 @@ public class LegalTextEditorBasic extends JFrame {
         fileMenu.add(menuItem("Open...", e -> openDocument()));
         fileMenu.add(menuItem("Save", e -> saveDocument(false)));
         fileMenu.add(menuItem("Save As...", e -> saveDocument(true)));
+        fileMenu.add(menuItem("Export PDF...", e -> exportPdf()));
         fileMenu.addSeparator();
         fileMenu.add(menuItem("Print...", e -> printDocument()));
         fileMenu.addSeparator();
-        fileMenu.add(menuItem("Exit", e -> dispose()));
+        fileMenu.add(menuItem("Exit", e -> exitEditor()));
 
         editMenu.add(menuItem("Undo", e -> undo()));
+        editMenu.add(menuItem("Redo", e -> redo()));
+        editMenu.addSeparator();
         editMenu.add(menuItem("Cut", e -> documentEditor.cut()));
         editMenu.add(menuItem("Copy", e -> documentEditor.copy()));
         editMenu.add(menuItem("Paste", e -> documentEditor.paste()));
         editMenu.add(menuItem("Select All", e -> documentEditor.selectAll()));
+        editMenu.addSeparator();
+        editMenu.add(menuItem("Find...", e -> findText()));
+        editMenu.add(menuItem("Find Next", e -> findNext()));
+        editMenu.add(menuItem("Replace...", e -> replaceTextDialog()));
 
         formatMenu.add(menuItem("Bold", e -> toggleStyle(BOLD_STYLE)));
         formatMenu.add(menuItem("Italic", e -> toggleStyle(ITALIC_STYLE)));
@@ -193,10 +216,11 @@ public class LegalTextEditorBasic extends JFrame {
         add(statusBar, BorderLayout.SOUTH);
 
         documentEditor.getDocument().addDocumentListener(new DocumentListener() {
-            public void insertUpdate(DocumentEvent e) { statusLabel.setText("Editing"); }
-            public void removeUpdate(DocumentEvent e) { statusLabel.setText("Editing"); }
-            public void changedUpdate(DocumentEvent e) { statusLabel.setText("Editing"); }
+            public void insertUpdate(DocumentEvent e) { markDocumentChanged(); }
+            public void removeUpdate(DocumentEvent e) { markDocumentChanged(); }
+            public void changedUpdate(DocumentEvent e) { markDocumentChanged(); }
         });
+        documentEditor.getDocument().addUndoableEditListener(undoListener);
 
         bindShortcut("B", KeyEvent.VK_B, InputEvent.CTRL_DOWN_MASK,
                 () -> toggleStyle(BOLD_STYLE));
@@ -207,6 +231,14 @@ public class LegalTextEditorBasic extends JFrame {
         bindShortcut("P", KeyEvent.VK_P, InputEvent.CTRL_DOWN_MASK, this::printDocument);
         bindShortcut("S", KeyEvent.VK_S, InputEvent.CTRL_DOWN_MASK,
                 () -> saveDocument(false));
+        bindShortcut("Z", KeyEvent.VK_Z, InputEvent.CTRL_DOWN_MASK, this::undo);
+        bindShortcut("Y", KeyEvent.VK_Y, InputEvent.CTRL_DOWN_MASK, this::redo);
+        bindShortcut("F", KeyEvent.VK_F, InputEvent.CTRL_DOWN_MASK, this::findText);
+        bindShortcut("H", KeyEvent.VK_H, InputEvent.CTRL_DOWN_MASK, this::replaceTextDialog);
+        bindShortcut("F3", KeyEvent.VK_F3, 0, this::findNext);
+        addWindowListener(new WindowAdapter() {
+            @Override public void windowClosing(WindowEvent event) { exitEditor(); }
+        });
     }
 
     private JMenuItem menuItem(String label, ActionListener action) {
@@ -277,14 +309,116 @@ public class LegalTextEditorBasic extends JFrame {
         documentEditor.requestFocusInWindow();
     }
 
+    private void markDocumentChanged() {
+        if (loadingDocument) return;
+        documentDirty = true;
+        statusLabel.setText("Editing");
+        setTitle("Legal Text Editor — " + (currentFile == null ? "Untitled" : currentFile.getName()) + " *");
+    }
+
+    private boolean confirmDiscardChanges() {
+        if (!documentDirty) return true;
+        Object[] options = {"Save", "Discard", "Cancel"};
+        int choice = JOptionPane.showOptionDialog(this, "Save changes to the current document?",
+                "Unsaved changes", JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE,
+                null, options, options[0]);
+        if (choice == 1) return true;
+        if (choice != 0) return false;
+        saveDocument(false);
+        return !documentDirty;
+    }
+
+    private void exitEditor() {
+        if (confirmDiscardChanges()) dispose();
+    }
+
+    private void findText() {
+        String initial = lastSearch.isEmpty() ? "" : lastSearch;
+        String query = JOptionPane.showInputDialog(this, "Find:", initial);
+        if (query == null || query.isEmpty()) return;
+        lastSearch = query;
+        findNext(query);
+    }
+
+    private void findNext() {
+        if (lastSearch.isEmpty()) { findText(); return; }
+        findNext(lastSearch);
+    }
+
+    private void findNext(String query) {
+        String text = documentEditor.getText();
+        int from = documentEditor.getSelectionEnd();
+        int found = findIgnoreCase(text, query, from, text.length());
+        if (found < 0 && from > 0) found = findIgnoreCase(text, query, 0, Math.min(from, text.length()));
+        if (found < 0) {
+            statusLabel.setText("Text not found: " + query);
+            return;
+        }
+        documentEditor.requestFocusInWindow();
+        documentEditor.select(found, found + query.length());
+        statusLabel.setText("Found: " + query);
+    }
+
+    private int findIgnoreCase(String text, String query, int from, int to) {
+        int last = Math.min(to - query.length(), text.length() - query.length());
+        for (int i = Math.max(0, from); i <= last; i++)
+            if (text.regionMatches(true, i, query, 0, query.length())) return i;
+        return -1;
+    }
+
+    private void replaceTextDialog() {
+        JTextField find = new JTextField(lastSearch, 24);
+        JTextField replace = new JTextField(24);
+        JPanel form = new JPanel(new GridLayout(2, 2, 6, 6));
+        form.add(new JLabel("Find:")); form.add(find);
+        form.add(new JLabel("Replace with:")); form.add(replace);
+        Object[] options = {"Replace Next", "Replace All", "Cancel"};
+        int choice = JOptionPane.showOptionDialog(this, form, "Find and Replace",
+                JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
+        String query = find.getText();
+        if (query.isEmpty() || choice < 0 || choice == 2) return;
+        lastSearch = query;
+        if (choice == 0) {
+            int start = documentEditor.getSelectionStart(), end = documentEditor.getSelectionEnd();
+            if (end - start == query.length()
+                    && documentEditor.getText().regionMatches(true, start, query, 0, query.length())) {
+                documentEditor.replaceSelection(replace.getText());
+            }
+            findNext(query);
+        } else {
+            String text = documentEditor.getText();
+            List<Integer> matches = new ArrayList<>();
+            for (int at = 0; at <= text.length() - query.length();) {
+                int found = findIgnoreCase(text, query, at, text.length());
+                if (found < 0) break;
+                matches.add(found);
+                at = found + query.length();
+            }
+            try {
+                StyledDocument doc = documentEditor.getStyledDocument();
+                for (int i = matches.size() - 1; i >= 0; i--) {
+                    int at = matches.get(i);
+                    doc.remove(at, query.length());
+                    doc.insertString(at, replace.getText(), null);
+                }
+                statusLabel.setText("Replaced " + matches.size() + " occurrence(s)");
+            } catch (BadLocationException ex) { showError("Could not replace text", ex); }
+        }
+    }
+
     private void newDocument() {
-        if (chatRequestInProgress) return;
+        if (chatRequestInProgress || !confirmDiscardChanges()) return;
+        loadingDocument = true;
         documentEditor.setText("");
+        loadingDocument = false;
+        undoManager.discardAllEdits();
+        documentDirty = false;
         currentFile = null;
         contextDocuments.clear();
         chatHistory.clear();
         jurisdiction = "";
         situationNotes = "";
+        setTitle("Legal Text Editor — Untitled");
         renderChat();
         caseLabel.setText("Case: No case selected");
         statusLabel.setText("New document");
@@ -454,24 +588,55 @@ public class LegalTextEditorBasic extends JFrame {
     }
 
     private void openDocument() {
-        if (chatRequestInProgress) return;
+        if (chatRequestInProgress || !confirmDiscardChanges()) return;
         JFileChooser chooser = new JFileChooser();
         chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
-                "Text and Rich Text files (*.txt, *.md, *.rtf)", "txt", "md", "rtf"));
+                "Documents (*.txt, *.md, *.rtf, *.docx)", "txt", "md", "rtf", "docx"));
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         File selectedFile = chooser.getSelectedFile();
         try (InputStream input = new BufferedInputStream(new FileInputStream(selectedFile))) {
+            loadingDocument = true;
             if (hasExtension(selectedFile, "rtf")) {
                 documentEditor.setText("");
                 new RTFEditorKit().read(input, documentEditor.getDocument(), 0);
+            } else if (hasExtension(selectedFile, "docx")) {
+                replaceDocument(DocxDocumentIO.read(input));
             } else {
                 documentEditor.setText(new String(input.readAllBytes(), StandardCharsets.UTF_8));
             }
+            loadingDocument = false;
+            undoManager.discardAllEdits();
+            documentDirty = false;
             currentFile = selectedFile;
+            setTitle("Legal Text Editor — " + currentFile.getName());
             loadSession();
             statusLabel.setText("Opened: " + currentFile.getName());
         } catch (IOException | BadLocationException ex) {
+            loadingDocument = false;
             showError("Could not open file", ex);
+        } finally {
+            loadingDocument = false;
+        }
+    }
+
+    private void replaceDocument(StyledDocument source) throws BadLocationException {
+        StyledDocument target = documentEditor.getStyledDocument();
+        if (target.getLength() > 0) target.remove(0, target.getLength());
+        int offset = 0;
+        while (offset < source.getLength()) {
+            Element character = source.getCharacterElement(offset);
+            int end = Math.min(character.getEndOffset(), source.getLength());
+            if (end <= offset) break;
+            target.insertString(target.getLength(), source.getText(offset, end - offset), character.getAttributes());
+            offset = end;
+        }
+        int paragraphOffset = 0;
+        while (paragraphOffset < source.getLength()) {
+            Element paragraph = source.getParagraphElement(paragraphOffset);
+            int end = Math.min(paragraph.getEndOffset(), source.getLength());
+            if (end <= paragraphOffset) break;
+            target.setParagraphAttributes(paragraphOffset, end - paragraphOffset, paragraph.getAttributes(), true);
+            paragraphOffset = end;
         }
     }
 
@@ -480,24 +645,42 @@ public class LegalTextEditorBasic extends JFrame {
             JFileChooser chooser = new JFileChooser();
             javax.swing.filechooser.FileNameExtensionFilter rtfFilter =
                     new javax.swing.filechooser.FileNameExtensionFilter("Rich Text Format (*.rtf)", "rtf");
+            javax.swing.filechooser.FileNameExtensionFilter docxFilter =
+                    new javax.swing.filechooser.FileNameExtensionFilter("Word Document (*.docx)", "docx");
+            javax.swing.filechooser.FileNameExtensionFilter markdownFilter =
+                    new javax.swing.filechooser.FileNameExtensionFilter("Markdown (*.md)", "md");
             chooser.addChoosableFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
                     "Plain Text (*.txt)", "txt"));
+            chooser.addChoosableFileFilter(markdownFilter);
             chooser.addChoosableFileFilter(rtfFilter);
+            chooser.addChoosableFileFilter(docxFilter);
             chooser.setFileFilter(rtfFilter);
             if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
             currentFile = chooser.getSelectedFile();
             if (chooser.getFileFilter() == rtfFilter && !hasExtension(currentFile, "rtf")) {
                 currentFile = new File(currentFile.getParentFile(), currentFile.getName() + ".rtf");
+            } else if (chooser.getFileFilter() == docxFilter && !hasExtension(currentFile, "docx")) {
+                currentFile = new File(currentFile.getParentFile(), currentFile.getName() + ".docx");
+            } else if (chooser.getFileFilter() == markdownFilter && !hasExtension(currentFile, "md")) {
+                currentFile = new File(currentFile.getParentFile(), currentFile.getName() + ".md");
+            } else if (chooser.getFileFilter() instanceof javax.swing.filechooser.FileNameExtensionFilter
+                    && ((javax.swing.filechooser.FileNameExtensionFilter) chooser.getFileFilter()).getExtensions()[0].equals("txt")
+                    && !hasExtension(currentFile, "txt")) {
+                currentFile = new File(currentFile.getParentFile(), currentFile.getName() + ".txt");
             }
         }
         try (OutputStream output = new BufferedOutputStream(new FileOutputStream(currentFile))) {
             if (hasExtension(currentFile, "rtf")) {
                 new RTFEditorKit().write(output, documentEditor.getDocument(), 0,
                         documentEditor.getDocument().getLength());
+            } else if (hasExtension(currentFile, "docx")) {
+                DocxDocumentIO.write(documentEditor.getStyledDocument(), output);
             } else {
                 output.write(documentEditor.getText().getBytes(StandardCharsets.UTF_8));
             }
             saveSession();
+            documentDirty = false;
+            setTitle("Legal Text Editor — " + currentFile.getName());
             statusLabel.setText("Saved: " + currentFile.getName());
         } catch (IOException | BadLocationException ex) {
             showError("Could not save file", ex);
@@ -579,12 +762,45 @@ public class LegalTextEditorBasic extends JFrame {
         }
     }
 
+    private void exportPdf() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Export PDF");
+        chooser.setSelectedFile(new File(currentFile == null ? "document.pdf"
+                : currentFile.getName().replaceFirst("(?i)\\.[^.]+$", "") + ".pdf"));
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File destination = chooser.getSelectedFile();
+        if (!hasExtension(destination, "pdf")) destination = new File(destination.getParentFile(), destination.getName() + ".pdf");
+        if (destination.exists() && JOptionPane.showConfirmDialog(this,
+                "Replace " + destination.getName() + "?", "Confirm Export", JOptionPane.YES_NO_OPTION)
+                != JOptionPane.YES_OPTION) return;
+        try {
+            PrinterJob job = PrinterJob.getPrinterJob();
+            job.setJobName("Export " + destination.getName());
+            job.setPrintable(documentEditor.getPrintable(null, null));
+            PrintRequestAttributeSet attributes = new HashPrintRequestAttributeSet();
+            attributes.add(new Destination(destination.toURI()));
+            if (!job.printDialog(attributes)) return;
+            if (job.getPrintService() == null
+                    || !job.getPrintService().isAttributeCategorySupported(Destination.class)) {
+                throw new PrinterException("The selected print service cannot save to a file. Choose a PDF-capable printer or install a system PDF printer.");
+            }
+            job.print(attributes);
+            statusLabel.setText("PDF exported: " + destination.getName());
+        } catch (PrinterException ex) {
+            showError("Could not export PDF. Choose a PDF-capable print service", ex);
+        }
+    }
+
     private void undo() {
-        // Minimal undo support is provided by Swing's text component actions when available.
-        Action action = documentEditor.getActionMap().get("undo");
-        if (action != null) action.actionPerformed(
-                new ActionEvent(documentEditor, ActionEvent.ACTION_PERFORMED, "undo"));
-        else statusLabel.setText("Undo is not available");
+        if (!undoManager.canUndo()) { statusLabel.setText("Nothing to undo"); return; }
+        try { undoManager.undo(); }
+        catch (CannotUndoException ex) { showError("Could not undo", ex); }
+    }
+
+    private void redo() {
+        if (!undoManager.canRedo()) { statusLabel.setText("Nothing to redo"); return; }
+        try { undoManager.redo(); }
+        catch (CannotRedoException ex) { showError("Could not redo", ex); }
     }
 
     private void bindShortcut(String name, int keyCode, int modifiers, Runnable action) {

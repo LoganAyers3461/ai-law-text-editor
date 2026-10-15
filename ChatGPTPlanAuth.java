@@ -131,7 +131,20 @@ public final class ChatGPTPlanAuth {
         HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create(TOKEN)).timeout(Duration.ofSeconds(30))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(payload)).build(), HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() / 100 != 2) throw new IOException("ChatGPT session expired; sign in again (HTTP " + response.statusCode() + ").");
+        if (response.statusCode() / 100 != 2) {
+            String error = jsonValue(response.body(), "error");
+            if ("invalid_grant".equals(error) || "invalid_refresh_token".equals(error)
+                    || "refresh_token_expired".equals(error) || "refresh_token_invalidated".equals(error)
+                    || "refresh_token_reused".equals(error)) {
+                p.remove("access_token"); p.remove("refresh_token"); p.remove("id_token"); p.remove("expires_at");
+                save(p);
+                throw new IOException("The saved ChatGPT authorization expired or was revoked. Sign in to ChatGPT again.");
+            }
+            String detail = jsonValue(response.body(), "error_description");
+            if (detail == null) detail = error;
+            if (detail == null) detail = "request failed";
+            throw new IOException("Could not refresh ChatGPT authorization (HTTP " + response.statusCode() + "): " + detail);
+        }
         String body = response.body();
         String access = jsonValue(body, "access_token"), rotated = jsonValue(body, "refresh_token");
         if (access == null) throw new IOException("Token refresh did not return an access token.");
