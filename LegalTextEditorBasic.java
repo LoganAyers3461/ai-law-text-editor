@@ -1,18 +1,38 @@
-import javax.swing.*;
-import javax.swing.border.EmptyBorder;
-import javax.swing.text.*;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.print.PrinterException;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.EnumSet;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.event.HyperlinkEvent;
+import javax.swing.text.*;
+import javax.swing.text.rtf.RTFEditorKit;
 
 public class LegalTextEditorBasic extends JFrame {
     private static final int BOLD_STYLE = 1, ITALIC_STYLE = 2, UNDERLINE_STYLE = 3;
     private final JTextPane documentEditor = new JTextPane();
     private final JLabel statusLabel = new JLabel("Ready");
     private final JLabel caseLabel = new JLabel("Case: No case selected");
+    private final JEditorPane aiPanel = new JEditorPane();
+    private final JTextArea chatInput = new JTextArea(3, 20);
+    private final List<String> contextDocuments = new ArrayList<>();
+    private final List<String> chatHistory = new ArrayList<>();
+    private final OpenAIClient aiClient = new OpenAIClient();
+    private final JButton uploadButton = new JButton("Upload Case Material");
+    private final JButton analyzeButton = new JButton("AI Analyze");
+    private final JButton sendButton = new JButton("Send");
+    private String jurisdiction = "";
+    private String situationNotes = "";
+    private boolean chatRequestInProgress;
     private File currentFile;
 
     public LegalTextEditorBasic() {
@@ -50,10 +70,10 @@ public class LegalTextEditorBasic extends JFrame {
         formatMenu.add(menuItem("Underline", e -> toggleStyle(UNDERLINE_STYLE)));
 
        
-        caseMenu.add(new JMenuItem("Case Information"));
-        caseMenu.add(new JMenuItem("Import Case Material"));
-        aiMenu.add(new JMenuItem("AI Analyze"));
-        aiMenu.add(new JMenuItem("AI Suggestions"));
+        caseMenu.add(menuItem("Case Information", e -> showCaseInformation()));
+        caseMenu.add(menuItem("Import Case Material...", e -> addContextDocuments()));
+        aiMenu.add(menuItem("AI Analyze", e -> analyzeDocument()));
+        aiMenu.add(menuItem("AI Suggestions", e -> analyzeDocument()));
         helpMenu.add(new JMenuItem("About"));
 
         menuBar.add(fileMenu);
@@ -84,8 +104,6 @@ public class LegalTextEditorBasic extends JFrame {
         JButton left = new JButton("Left");
         JButton center = new JButton("Center");
         JButton right = new JButton("Right");
-        JButton upload = new JButton("Upload Case Material");
-        JButton analyze = new JButton("AI Analyze");
 
         bold.addActionListener(e -> toggleStyle(BOLD_STYLE));
         italic.addActionListener(e -> toggleStyle(ITALIC_STYLE));
@@ -95,11 +113,13 @@ public class LegalTextEditorBasic extends JFrame {
         left.addActionListener(e -> alignText(StyleConstants.ALIGN_LEFT));
         center.addActionListener(e -> alignText(StyleConstants.ALIGN_CENTER));
         right.addActionListener(e -> alignText(StyleConstants.ALIGN_RIGHT));
+        uploadButton.addActionListener(e -> addContextDocuments());
+        analyzeButton.addActionListener(e -> analyzeDocument());
 
       
         
-        upload.setFocusable(false);
-        analyze.setFocusable(false);
+        uploadButton.setFocusable(false);
+        analyzeButton.setFocusable(false);
 
         toolbar.add(bold);
         toolbar.add(italic);
@@ -114,34 +134,51 @@ public class LegalTextEditorBasic extends JFrame {
         toolbar.add(center);
         toolbar.add(right);
         toolbar.add(Box.createHorizontalStrut(10));
-        toolbar.add(upload);
-        toolbar.add(analyze);
+        toolbar.add(uploadButton);
+        toolbar.add(analyzeButton);
         mainPanel.add(toolbar, BorderLayout.NORTH);
 
         documentEditor.setFont(new Font("Serif", Font.PLAIN, 16));
         documentEditor.setMargin(new Insets(45, 55, 45, 55));
-        documentEditor.setText(
-                "Legal Document\n\n" +
-                "Case Name: ______________________________________\n\n" +
-                "Case Number: ____________________________________\n\n\n" +
-                "Begin drafting your legal document here...");
+        // documentEditor.setText(
+        //         "Legal Document\n\n" +
+        //         "Case Name: ______________________________________\n\n" +
+        //         "Case Number: ____________________________________\n\n\n" +
+        //         "Begin drafting your legal document here...");
         JScrollPane documentScroll = new JScrollPane(documentEditor);
         documentScroll.setBorder(BorderFactory.createTitledBorder("Document Editor"));
 
-        JTextArea aiPanel = new JTextArea();
+        aiPanel.setContentType("text/html");
         aiPanel.setEditable(false);
-        aiPanel.setLineWrap(true);
-        aiPanel.setWrapStyleWord(true);
         aiPanel.setFont(new Font("SansSerif", Font.PLAIN, 14));
         aiPanel.setMargin(new Insets(10, 10, 10, 10));
-        aiPanel.setText("AI Suggestions\n\nRelevant case law\n\nRelevant statutes\n\n" +
-                "Relevant rulings\n\nCase analysis\n\nResearch suggestions");
+        aiPanel.addHyperlinkListener(event -> {
+            if (event.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
+                try {
+                    if (Desktop.isDesktopSupported()) Desktop.getDesktop().browse(event.getURL().toURI());
+                } catch (Exception ex) {
+                    showError("Could not open reference", ex);
+                }
+            }
+        });
         JScrollPane aiScroll = new JScrollPane(aiPanel);
-        aiScroll.setPreferredSize(new Dimension(330, 0));
-        aiScroll.setBorder(BorderFactory.createTitledBorder("AI Suggestions"));
+        aiScroll.setBorder(BorderFactory.createTitledBorder("Document Chat"));
+
+        JPanel chatComposer = new JPanel(new BorderLayout(5, 5));
+        chatInput.setLineWrap(true);
+        chatInput.setWrapStyleWord(true);
+        chatInput.setFont(new Font("SansSerif", Font.PLAIN, 14));
+        chatInput.setBorder(BorderFactory.createTitledBorder("Message"));
+        sendButton.addActionListener(e -> sendChatMessage());
+        chatComposer.add(new JScrollPane(chatInput), BorderLayout.CENTER);
+        chatComposer.add(sendButton, BorderLayout.EAST);
+        JPanel aiContainer = new JPanel(new BorderLayout(5, 5));
+        aiContainer.add(aiScroll, BorderLayout.CENTER);
+        aiContainer.add(chatComposer, BorderLayout.SOUTH);
+        aiContainer.setPreferredSize(new Dimension(360, 0));
 
         JSplitPane splitPane = new JSplitPane(
-                JSplitPane.HORIZONTAL_SPLIT, documentScroll, aiScroll);
+                JSplitPane.HORIZONTAL_SPLIT, documentScroll, aiContainer);
         splitPane.setDividerLocation(800);
         mainPanel.add(splitPane, BorderLayout.CENTER);
 
@@ -222,36 +259,194 @@ public class LegalTextEditorBasic extends JFrame {
     }
 
     private void alignText(int alignment) {
+        StyledDocument document = documentEditor.getStyledDocument();
         int start = documentEditor.getSelectionStart();
         int end = documentEditor.getSelectionEnd();
-        int length = documentEditor.getDocument().getLength();
-        int from = start == end ? 0 : start;
-        int to = start == end ? length : end;
+        Element firstParagraph = document.getParagraphElement(start);
+        // A selection ending at the start of a paragraph does not include that paragraph.
+        int lastOffset = end > start ? end - 1 : start;
+        Element lastParagraph = document.getParagraphElement(lastOffset);
+        int from = firstParagraph.getStartOffset();
+        int to = Math.min(document.getLength(), lastParagraph.getEndOffset());
         SimpleAttributeSet attributes = new SimpleAttributeSet();
         StyleConstants.setAlignment(attributes, alignment);
-        documentEditor.getStyledDocument().setParagraphAttributes(
-                from, Math.max(1, to - from), attributes, false);
+        document.setParagraphAttributes(from, Math.max(1, to - from), attributes, false);
         documentEditor.requestFocusInWindow();
     }
 
     private void newDocument() {
+        if (chatRequestInProgress) return;
         documentEditor.setText("");
         currentFile = null;
+        contextDocuments.clear();
+        chatHistory.clear();
+        jurisdiction = "";
+        situationNotes = "";
+        renderChat();
         caseLabel.setText("Case: No case selected");
         statusLabel.setText("New document");
     }
 
-    private void openDocument() {
+    private void addContextDocuments() {
         JFileChooser chooser = new JFileChooser();
+        chooser.setMultiSelectionEnabled(true);
+        chooser.setDialogTitle("Add context documents (plain text)");
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        currentFile = chooser.getSelectedFile();
-        try (BufferedReader reader = new BufferedReader(new FileReader(currentFile))) {
-            documentEditor.setText("");
-            String line;
-            while ((line = reader.readLine()) != null) {
-                documentEditor.getDocument().insertString(
-                        documentEditor.getDocument().getLength(), line + "\n", null);
+        int added = 0;
+        for (File file : chooser.getSelectedFiles()) {
+            try {
+                String content = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+                contextDocuments.add("[" + file.getName() + "]\n" + content);
+                added++;
+            } catch (IOException ex) {
+                showError("Could not read " + file.getName(), ex);
             }
+        }
+        statusLabel.setText(added + " context document(s) added (" + contextDocuments.size() + " total)");
+        saveSession();
+    }
+
+    private void analyzeDocument() {
+        sendMessage("Analyze the current draft. Identify issues and ambiguities, and support factual or legal claims with explicit references.");
+    }
+
+    private void sendChatMessage() {
+        String message = chatInput.getText().trim();
+        if (message.isEmpty()) return;
+        chatInput.setText("");
+        sendMessage(message);
+    }
+
+    private void sendMessage(String message) {
+        if (chatRequestInProgress) return;
+        String document = documentEditor.getText();
+        if (document.isBlank()) {
+            JOptionPane.showMessageDialog(this, "Enter or open a document before chatting.",
+                    "Document Chat", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        List<String> context = new ArrayList<>(contextDocuments);
+        String history = String.join("\n\n", chatHistory);
+        String requestJurisdiction = jurisdiction;
+        String requestSituationNotes = situationNotes;
+        chatHistory.add("You: " + message);
+        renderChat();
+        saveSession();
+        statusLabel.setText("AI response in progress");
+        setAiActionsEnabled(false);
+        sendButton.setEnabled(false);
+        documentEditor.setEditable(false);
+        chatRequestInProgress = true;
+        new SwingWorker<String, Void>() {
+            protected String doInBackground() throws Exception {
+                return aiClient.chat(document, context, requestJurisdiction,
+                        requestSituationNotes, history, message);
+            }
+            protected void done() {
+                setAiActionsEnabled(true);
+                sendButton.setEnabled(true);
+                documentEditor.setEditable(true);
+                chatRequestInProgress = false;
+                try {
+                    chatHistory.add("Assistant: " + get());
+                    renderChat();
+                    saveSession();
+                    statusLabel.setText("Response complete");
+                } catch (Exception ex) {
+                    Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+                    chatHistory.add("Assistant: Request failed: " + cause.getMessage());
+                    renderChat();
+                    saveSession();
+                    statusLabel.setText("AI request failed");
+                }
+            }
+        }.execute();
+    }
+
+    private void renderChat() {
+        String content;
+        if (chatHistory.isEmpty()) {
+            content = "This document's chat and case context are saved with the document.\n"
+                    + "Set its jurisdiction in Case Information and attach relevant source files.";
+        } else {
+            content = String.join("\n\n", chatHistory);
+        }
+        String escaped = escapeHtml(content);
+        java.util.regex.Matcher urls = java.util.regex.Pattern.compile("https?://[^\\s<]+", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(escaped);
+        StringBuffer linked = new StringBuffer();
+        while (urls.find()) {
+            String url = urls.group();
+            while (url.endsWith(".") || url.endsWith(",") || url.endsWith(")")) url = url.substring(0, url.length() - 1);
+            urls.appendReplacement(linked, java.util.regex.Matcher.quoteReplacement(
+                    "<a href=\"" + url + "\">" + url + "</a>" + urls.group().substring(url.length())));
+        }
+        urls.appendTail(linked);
+        aiPanel.setText("<html><body style='font-family:sans-serif;font-size:10pt'>"
+                + linked.toString().replace("\n", "<br>") + "</body></html>");
+        aiPanel.setCaretPosition(0);
+    }
+
+    private String escapeHtml(String text) {
+        return text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    private void setAiActionsEnabled(boolean enabled) {
+        // Keep analysis available from both the toolbar and menu while requests run.
+        for (Component component : getJMenuBar().getComponents()) {
+            if (component instanceof JMenu && ((JMenu) component).getText().equals("AI")) {
+                for (Component item : ((JMenu) component).getMenuComponents()) item.setEnabled(enabled);
+            }
+        }
+        uploadButton.setEnabled(enabled);
+        analyzeButton.setEnabled(enabled);
+    }
+
+    private void showCaseInformation() {
+        JTextField jurisdictionField = new JTextField(jurisdiction, 28);
+        JTextArea notesField = new JTextArea(situationNotes, 5, 28);
+        notesField.setLineWrap(true);
+        notesField.setWrapStyleWord(true);
+        JPanel form = new JPanel(new GridBagLayout());
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.insets = new Insets(4, 4, 4, 4);
+        constraints.anchor = GridBagConstraints.NORTHWEST;
+        constraints.fill = GridBagConstraints.HORIZONTAL;
+        constraints.gridx = 0; constraints.gridy = 0;
+        form.add(new JLabel("Applicable jurisdiction(s):"), constraints);
+        constraints.gridx = 1;
+        form.add(jurisdictionField, constraints);
+        constraints.gridx = 0; constraints.gridy = 1;
+        form.add(new JLabel("Situation notes:"), constraints);
+        constraints.gridx = 1; constraints.fill = GridBagConstraints.BOTH;
+        form.add(new JScrollPane(notesField), constraints);
+        int choice = JOptionPane.showConfirmDialog(this, form,
+                "Case Information — " + (currentFile == null ? "Untitled document" : currentFile.getName()),
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (choice == JOptionPane.OK_OPTION) {
+            jurisdiction = jurisdictionField.getText().trim();
+            situationNotes = notesField.getText().trim();
+            caseLabel.setText(jurisdiction.isEmpty() ? "Case: No jurisdiction set" : "Jurisdiction: " + jurisdiction);
+            saveSession();
+        }
+    }
+
+    private void openDocument() {
+        if (chatRequestInProgress) return;
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                "Text and Rich Text files (*.txt, *.md, *.rtf)", "txt", "md", "rtf"));
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File selectedFile = chooser.getSelectedFile();
+        try (InputStream input = new BufferedInputStream(new FileInputStream(selectedFile))) {
+            if (hasExtension(selectedFile, "rtf")) {
+                documentEditor.setText("");
+                new RTFEditorKit().read(input, documentEditor.getDocument(), 0);
+            } else {
+                documentEditor.setText(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            }
+            currentFile = selectedFile;
+            loadSession();
             statusLabel.setText("Opened: " + currentFile.getName());
         } catch (IOException | BadLocationException ex) {
             showError("Could not open file", ex);
@@ -261,15 +456,96 @@ public class LegalTextEditorBasic extends JFrame {
     private void saveDocument(boolean saveAs) {
         if (currentFile == null || saveAs) {
             JFileChooser chooser = new JFileChooser();
+            javax.swing.filechooser.FileNameExtensionFilter rtfFilter =
+                    new javax.swing.filechooser.FileNameExtensionFilter("Rich Text Format (*.rtf)", "rtf");
+            chooser.addChoosableFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                    "Plain Text (*.txt)", "txt"));
+            chooser.addChoosableFileFilter(rtfFilter);
+            chooser.setFileFilter(rtfFilter);
             if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
             currentFile = chooser.getSelectedFile();
+            if (chooser.getFileFilter() == rtfFilter && !hasExtension(currentFile, "rtf")) {
+                currentFile = new File(currentFile.getParentFile(), currentFile.getName() + ".rtf");
+            }
         }
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(currentFile))) {
-            writer.write(documentEditor.getText());
+        try (OutputStream output = new BufferedOutputStream(new FileOutputStream(currentFile))) {
+            if (hasExtension(currentFile, "rtf")) {
+                new RTFEditorKit().write(output, documentEditor.getDocument(), 0,
+                        documentEditor.getDocument().getLength());
+            } else {
+                output.write(documentEditor.getText().getBytes(StandardCharsets.UTF_8));
+            }
+            saveSession();
             statusLabel.setText("Saved: " + currentFile.getName());
-        } catch (IOException ex) {
+        } catch (IOException | BadLocationException ex) {
             showError("Could not save file", ex);
         }
+    }
+
+    private boolean hasExtension(File file, String extension) {
+        String name = file.getName().toLowerCase(java.util.Locale.ROOT);
+        return name.endsWith("." + extension);
+    }
+
+    private File sessionFile() {
+        if (currentFile == null) return null;
+        return currentFile.toPath().toAbsolutePath()
+                .resolveSibling(currentFile.getName() + ".session.properties").toFile();
+    }
+
+    private void saveSession() {
+        File file = sessionFile();
+        if (file == null) return; // Untitled sessions remain in memory until the document is saved.
+        Properties properties = new Properties();
+        properties.setProperty("jurisdiction", jurisdiction);
+        properties.setProperty("situationNotes", situationNotes);
+        properties.setProperty("context.count", Integer.toString(contextDocuments.size()));
+        for (int i = 0; i < contextDocuments.size(); i++)
+            properties.setProperty("context." + i, contextDocuments.get(i));
+        properties.setProperty("chat.count", Integer.toString(chatHistory.size()));
+        for (int i = 0; i < chatHistory.size(); i++)
+            properties.setProperty("chat." + i, chatHistory.get(i));
+        try (Writer writer = new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8)) {
+            properties.store(writer, "Per-document AI chat and case context");
+            try {
+                Files.setPosixFilePermissions(file.toPath(), EnumSet.of(
+                        PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+            } catch (UnsupportedOperationException ignored) {
+                // Non-POSIX systems use their normal per-user file permissions.
+            }
+        } catch (IOException ex) {
+            showError("Could not save document chat session", ex);
+        }
+    }
+
+    private void loadSession() {
+        contextDocuments.clear();
+        chatHistory.clear();
+        jurisdiction = "";
+        situationNotes = "";
+        File file = sessionFile();
+        if (file != null && file.isFile()) {
+            Properties properties = new Properties();
+            try (Reader reader = new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8)) {
+                properties.load(reader);
+                jurisdiction = properties.getProperty("jurisdiction", "");
+                situationNotes = properties.getProperty("situationNotes", "");
+                int contextCount = Integer.parseInt(properties.getProperty("context.count", "0"));
+                for (int i = 0; i < contextCount; i++)
+                    contextDocuments.add(properties.getProperty("context." + i, ""));
+                int chatCount = Integer.parseInt(properties.getProperty("chat.count", "0"));
+                for (int i = 0; i < chatCount; i++)
+                    chatHistory.add(properties.getProperty("chat." + i, ""));
+            } catch (IOException | NumberFormatException ex) {
+                showError("Could not restore document chat session", ex);
+                contextDocuments.clear();
+                chatHistory.clear();
+                jurisdiction = "";
+                situationNotes = "";
+            }
+        }
+        caseLabel.setText(jurisdiction.isEmpty() ? "Case: No jurisdiction set" : "Jurisdiction: " + jurisdiction);
+        renderChat();
     }
 
     private void printDocument() {
