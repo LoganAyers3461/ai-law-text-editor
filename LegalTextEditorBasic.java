@@ -117,6 +117,15 @@ public class LegalTextEditorBasic extends JFrame {
         JButton bold = new JButton("B");
         JButton italic = new JButton("I");
         JButton underline = new JButton("U");
+        JButton save = new JButton("Save");
+
+        setButtonIcon(save, "/icons/save.png");
+        save.setToolTipText("Save Document");
+
+        save.addActionListener(e -> saveDocument(false));
+        setButtonIcon(bold, "/icons/bold.png");
+        setButtonIcon(italic, "/icons/italic.png");
+        setButtonIcon(underline, "/icons/underline.png");
         bold.setFont(new Font("SansSerif", Font.BOLD, 14));
         italic.setFont(new Font("SansSerif", Font.ITALIC, 14));
         underline.setFont(new Font("SansSerif", Font.PLAIN, 14));
@@ -139,6 +148,10 @@ public class LegalTextEditorBasic extends JFrame {
         left.addActionListener(e -> alignText(StyleConstants.ALIGN_LEFT));
         center.addActionListener(e -> alignText(StyleConstants.ALIGN_CENTER));
         right.addActionListener(e -> alignText(StyleConstants.ALIGN_RIGHT));
+        toolbar.add(bold);
+        toolbar.add(italic);
+        toolbar.add(underline);
+        toolbar.add(save);
         uploadButton.addActionListener(e -> addContextDocuments());
         analyzeButton.addActionListener(e -> analyzeDocument());
 
@@ -240,6 +253,24 @@ public class LegalTextEditorBasic extends JFrame {
             @Override public void windowClosing(WindowEvent event) { exitEditor(); }
         });
     }
+
+    private void setButtonIcon(JButton button, String iconPath) {
+    java.net.URL url = getClass().getResource(iconPath);
+
+    if (url != null) {
+        ImageIcon icon = new ImageIcon(url);
+
+        Image scaledImage = icon.getImage().getScaledInstance(
+            20, 20, Image.SCALE_SMOOTH
+        );
+
+        button.setIcon(new ImageIcon(scaledImage));
+    } else {
+        System.out.println("Icon not found: " + iconPath);
+    }
+}
+    
+
 
     private JMenuItem menuItem(String label, ActionListener action) {
         JMenuItem item = new JMenuItem(label);
